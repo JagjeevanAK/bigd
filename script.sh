@@ -368,6 +368,9 @@ init_hive_schema() {
 test_hdfs() {
   log "== TEST 1: HDFS basic operations =="
   local sample=/tmp/hadoop-test-data.txt
+  # Remove any stale file from older runs. Root owns /tmp so this always works,
+  # even for files owned by the hadoop user (sticky bit).
+  rm -f "${sample}"
   # Create the test file as the hadoop user (owner) so root never has to
   # chown/chmod across user boundaries (fails in user namespaces / Docker).
   su - "${HADOOP_USER}" -c '
@@ -397,6 +400,9 @@ test_hdfs() {
 test_hive() {
   log "== TEST 3: Hive end-to-end (create/load/select) =="
 
+  # Remove any stale file from older runs first (root owns /tmp, so this
+  # always succeeds regardless of the previous owner).
+  rm -f /tmp/hive_test_data.csv
   # Create the CSV as the hadoop user (owner) so LOAD DATA LOCAL can always
   # read it, even across user namespaces (rootless Docker, etc.).
   su - "${HADOOP_USER}" -c '
