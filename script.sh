@@ -59,6 +59,21 @@ install_packages() {
   # Remove any stale Adoptium repo from a previous failed run
   rm -f /etc/apt/sources.list.d/adoptium.list
 
+  # Wait for any running apt/dpkg processes (e.g. unattended-upgrades) to finish
+  local wait_count=0
+  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
+        fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
+        fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+    if (( wait_count == 0 )); then
+      warn "Waiting for another package manager to finish (unattended-upgrades?)..."
+    fi
+    sleep 5
+    (( wait_count++ ))
+    if (( wait_count >= 60 )); then
+      die "Timed out waiting for dpkg lock after 5 minutes. Kill unattended-upgrades and retry."
+    fi
+  done
+
   apt-get update -y
   apt-get install -y --no-install-recommends \
     ca-certificates curl wget gnupg apt-transport-https lsb-release \
@@ -225,8 +240,16 @@ configure_hive() {
   log "Configuring Hive (${HIVE_VERSION}) ..."
 
   # Classic guava conflict fix between Hive 3.x and Hadoop 2.x
-  rm -f "${HIVE_HOME}/lib/guava-19.0.jar"
-  cp "${HADOOP_HOME}/share/hadoop/common/lib/guava-11.0.2.jar" "${HIVE_HOME}/lib/"
+  # Remove Hive's bundled guava and copy Hadoop's version (filename varies by build)
+  rm -f "${HIVE_HOME}"/lib/guava-*.jar
+  local hadoop_guava
+  hadoop_guava="$(ls "${HADOOP_HOME}"/share/hadoop/common/lib/guava-*.jar 2>/dev/null | head -1)"
+  if [[ -n "${hadoop_guava}" ]]; then
+    cp "${hadoop_guava}" "${HIVE_HOME}/lib/"
+    log "Copied $(basename "${hadoop_guava}") to Hive lib."
+  else
+    warn "Could not find Hadoop's guava jar — Hive may have classpath issues."
+  fi
 
   mkdir -p /home/${HADOOP_USER}/hive-metastore
   chown -R "${HADOOP_USER}:${HADOOP_GROUP}" /home/${HADOOP_USER}/hive-metastore
