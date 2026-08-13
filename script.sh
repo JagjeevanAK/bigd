@@ -126,9 +126,19 @@ download_and_extract() {
 # ---------------------------- Configuration ----------------------------------
 setup_env() {
   log "Writing environment to /etc/profile.d/bigdata.sh ..."
+
+  # Resolve JAVA_HOME: prefer known Temurin path, fall back to dynamic lookup
+  local resolved_java_home
+  resolved_java_home="$(ls -d /usr/lib/jvm/temurin-8-jdk-* 2>/dev/null | head -1)"
+  if [[ -z "${resolved_java_home}" ]]; then
+    resolved_java_home="\$(dirname \$(dirname \$(readlink -f \$(which java))))"
+  fi
+
   cat > /etc/profile.d/bigdata.sh <<EOF
-export JAVA_HOME="\$(dirname \$(dirname \$(readlink -f \$(which java))))"
+export JAVA_HOME="${resolved_java_home}"
 export HADOOP_HOME="${HADOOP_HOME}"
+export HADOOP_CONF_DIR="${HADOOP_HOME}/etc/hadoop"
+export HADOOP_MAPRED_HOME="${HADOOP_HOME}"
 export HIVE_HOME="${HIVE_HOME}"
 export PATH="\${HADOOP_HOME}/bin:\${HADOOP_HOME}/sbin:\${HIVE_HOME}/bin:\${PATH}"
 export PDSH_RCMD_TYPE=ssh
@@ -216,14 +226,20 @@ EOF
 setup_ssh() {
   log "Setting up passwordless SSH for user '${HADOOP_USER}' ..."
   local key=/home/${HADOOP_USER}/.ssh/id_rsa
+  local auth=/home/${HADOOP_USER}/.ssh/authorized_keys
   mkdir -p /home/${HADOOP_USER}/.ssh
   if [[ ! -f "${key}" ]]; then
     su - "${HADOOP_USER}" -c "ssh-keygen -t rsa -P '' -f ${key}"
   fi
-  cat "${key}.pub" >> /home/${HADOOP_USER}/.ssh/authorized_keys
+
+  # Append public key only if not already present (idempotent)
+  if ! grep -qF "$(cat "${key}.pub")" "${auth}" 2>/dev/null; then
+    cat "${key}.pub" >> "${auth}"
+  fi
+
   chown -R "${HADOOP_USER}:${HADOOP_GROUP}" /home/${HADOOP_USER}/.ssh
   chmod 700 /home/${HADOOP_USER}/.ssh
-  chmod 600 /home/${HADOOP_USER}/.ssh/authorized_keys
+  chmod 600 "${auth}"
 
   su - "${HADOOP_USER}" -c "ssh-keyscan -H localhost >> /home/${HADOOP_USER}/.ssh/known_hosts 2>/dev/null || true"
   su - "${HADOOP_USER}" -c "ssh-keyscan -H 0.0.0.0 >> /home/${HADOOP_USER}/.ssh/known_hosts 2>/dev/null || true"
@@ -248,11 +264,43 @@ format_namenode() {
 start_services() {
   log "Starting HDFS and YARN daemons ..."
   su - "${HADOOP_USER}" -c ". /etc/profile.d/bigdata.sh && ${HADOOP_HOME}/sbin/start-dfs.sh && ${HADOOP_HOME}/sbin/start-yarn.sh"
-  sleep 10
+
+  # Wait for NameNode to leave safe mode (up to 60 seconds)
+  log "Waiting for NameNode to leave safe mode ..."
+  local retries=0
+  while (( retries < 12 )); do
+    if su - "${HADOOP_USER}" -c ". /etc/profile.d/bigdata.sh && hdfs dfsadmin -safemode get 2>/dev/null" \
+         | grep -q 'OFF'; then
+      break
+    fi
+    sleep 5
+    (( retries++ ))
+  done
+  if (( retries >= 12 )); then
+    warn "NameNode did not leave safe mode within 60s — continuing anyway."
+  fi
+
   su - "${HADOOP_USER}" -c ". /etc/profile.d/bigdata.sh && jps"
 }
 
+create_hive_hdfs_dirs() {
+  log "Creating HDFS directories for Hive ..."
+  su - "${HADOOP_USER}" -c "
+    . /etc/profile.d/bigdata.sh
+    hdfs dfs -mkdir -p /tmp
+    hdfs dfs -chmod 1777 /tmp
+    hdfs dfs -mkdir -p /user/hive/warehouse
+    hdfs dfs -chmod 775 /user/hive/warehouse
+    hdfs dfs -mkdir -p /user/${HADOOP_USER}
+  "
+}
+
 init_hive_schema() {
+  # Skip if Derby metastore already exists
+  if [[ -d /home/${HADOOP_USER}/hive-metastore/metastore_db ]]; then
+    log "Hive metastore DB already exists, skipping schema init."
+    return
+  fi
   log "Initializing Hive metastore schema (Derby) ..."
   su - "${HADOOP_USER}" -c ". /etc/profile.d/bigdata.sh && schematool -dbType derby -initSchema" \
     >/tmp/schematool.log 2>&1 || { warn "schematool exit code $? (may already be initialized)"; }
@@ -283,19 +331,26 @@ test_hdfs() {
 }
 
 test_hive() {
-  log "== TEST 3: Hive end-to-end (create/insert/select) =="
+  log "== TEST 3: Hive end-to-end (create/load/select) =="
+
+  # Create a small CSV test file to load (avoids ACID/INSERT VALUES issues)
+  local testcsv=/tmp/hive_test_data.csv
+  printf '1,Alice\n2,Bob\n3,Charlie\n' > "${testcsv}"
+  chown "${HADOOP_USER}:${HADOOP_GROUP}" "${testcsv}"
+
   su - "${HADOOP_USER}" -c "
     . /etc/profile.d/bigdata.sh
-    hive --database default -e '
-      CREATE TABLE IF NOT EXISTS students(id INT, name STRING);
-      INSERT INTO students VALUES (1, \"Alice\"), (2, \"Bob\"), (3, \"Charlie\");
+    hive --database default -e \"
+      DROP TABLE IF EXISTS students;
+      CREATE TABLE students(id INT, name STRING) ROW FORMAT DELIMITED FIELDS TERMINATED BY ',';
+      LOAD DATA LOCAL INPATH '${testcsv}' INTO TABLE students;
       SELECT id, name FROM students ORDER BY id;
       DROP TABLE students;
-    '
+    \"
   " > /tmp/hive-test.log 2>&1 || die "Hive test FAILED (see /tmp/hive-test.log)"
-  grep -A 10 "SELECT id, name" /tmp/hive-test.log | grep -E "Alice|Bob|Charlie" \
+  grep -E 'Alice|Bob|Charlie' /tmp/hive-test.log \
     || die "Hive test FAILED: expected rows not found in output."
-  log "Hive test PASSED (table created, rows inserted, queried, dropped)."
+  log "Hive test PASSED (table created, data loaded, queried, dropped)."
 }
 
 verify_all() {
@@ -359,6 +414,7 @@ main() {
   setup_ssh
   format_namenode
   start_services
+  create_hive_hdfs_dirs
   init_hive_schema
   test_hdfs
   test_hive
