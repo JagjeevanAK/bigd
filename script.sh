@@ -75,7 +75,17 @@ install_java8() {
   mkdir -p /etc/apt/keyrings
   wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \
     | gpg --dearmor -o /etc/apt/keyrings/adoptium.gpg
-  echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(lsb_release -cs) main" \
+
+  # Determine a codename that Adoptium actually supports
+  local codename
+  codename="$(lsb_release -cs 2>/dev/null || echo jammy)"
+  local repo_url="https://packages.adoptium.net/artifactory/deb/dists/${codename}/Release"
+  if ! wget -q --spider "${repo_url}" 2>/dev/null; then
+    warn "Adoptium repo has no packages for '${codename}', falling back to 'jammy' (22.04 LTS)."
+    codename="jammy"
+  fi
+
+  echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb ${codename} main" \
     > /etc/apt/sources.list.d/adoptium.list
   apt-get update -y
   apt-get install -y temurin-8-jdk
