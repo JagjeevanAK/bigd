@@ -55,6 +55,10 @@ check_os() {
 install_packages() {
   log "Installing system packages..."
   export DEBIAN_FRONTEND=noninteractive
+
+  # Remove any stale Adoptium repo from a previous failed run
+  rm -f /etc/apt/sources.list.d/adoptium.list
+
   apt-get update -y
   apt-get install -y --no-install-recommends \
     ca-certificates curl wget gnupg apt-transport-https lsb-release \
