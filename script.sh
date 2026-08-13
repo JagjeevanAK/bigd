@@ -476,4 +476,4 @@ main() {
   print_summary
 }
 
-main "$@"
+main "$@" </dev/null
