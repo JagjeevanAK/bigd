@@ -94,14 +94,20 @@ install_java8() {
   apt-get update -y
   apt-get install -y temurin-8-jdk
 
-  # Make it the default java
+  # Make Java 8 the system default (high priority to beat any pre-installed JDK)
   local jdkdir
   jdkdir="$(ls -d /usr/lib/jvm/temurin-8-jdk-* 2>/dev/null | head -1)"
   if [[ -n "${jdkdir}" ]]; then
-    update-alternatives --install /usr/bin/java java "${jdkdir}/bin/java" 1 || true
-    update-alternatives --install /usr/bin/javac javac "${jdkdir}/bin/javac" 1 || true
+    update-alternatives --install /usr/bin/java java "${jdkdir}/bin/java" 1081 || true
+    update-alternatives --install /usr/bin/javac javac "${jdkdir}/bin/javac" 1081 || true
+    update-alternatives --set java "${jdkdir}/bin/java" 2>/dev/null || true
+    update-alternatives --set javac "${jdkdir}/bin/javac" 2>/dev/null || true
   fi
   java -version 2>&1 | head -1 || die "Java 8 installation failed."
+  # Verify we actually got Java 8 (not 9+)
+  if ! java -version 2>&1 | grep -q '"1\.8'; then
+    die "Java 8 is not the default. Found: $(java -version 2>&1 | head -1). Remove other JDKs or fix alternatives."
+  fi
 }
 
 setup_hadoop_user() {
@@ -224,6 +230,14 @@ configure_hive() {
 
   mkdir -p /home/${HADOOP_USER}/hive-metastore
   chown -R "${HADOOP_USER}:${HADOOP_GROUP}" /home/${HADOOP_USER}/hive-metastore
+
+  # Force Hive to use Java 8 explicitly (prevents Java 9+ ClassLoader crash)
+  local jdkdir
+  jdkdir="$(ls -d /usr/lib/jvm/temurin-8-jdk-* 2>/dev/null | head -1)"
+  cat > "${HIVE_HOME}/conf/hive-env.sh" <<EOF
+export JAVA_HOME="${jdkdir}"
+export HADOOP_HOME="${HADOOP_HOME}"
+EOF
 
   cat > "${HIVE_HOME}/conf/hive-site.xml" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
