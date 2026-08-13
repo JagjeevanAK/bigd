@@ -368,13 +368,17 @@ init_hive_schema() {
 test_hdfs() {
   log "== TEST 1: HDFS basic operations =="
   local sample=/tmp/hadoop-test-data.txt
-  {
-    echo "hadoop-test-file generated $(date)"
-    echo "hostname: $(hostname)"
-    seq 1 100
-  } > "${sample}"
-  chown "${HADOOP_USER}:${HADOOP_GROUP}" "${sample}"
-  chmod 644 "${sample}"
+  # Create the test file as the hadoop user (owner) so root never has to
+  # chown/chmod across user boundaries (fails in user namespaces / Docker).
+  su - "${HADOOP_USER}" -c '
+    rm -f /tmp/hadoop-test-data.txt
+    {
+      echo "hadoop-test-file generated $(date)"
+      echo "hostname: $(hostname)"
+      seq 1 100
+    } > /tmp/hadoop-test-data.txt
+    chmod 644 /tmp/hadoop-test-data.txt
+  ' || die "Failed to create test data file for ${HADOOP_USER}."
 
   su - "${HADOOP_USER}" -c "
     . /etc/profile.d/bigdata.sh
@@ -393,11 +397,14 @@ test_hdfs() {
 test_hive() {
   log "== TEST 3: Hive end-to-end (create/load/select) =="
 
-  # Create a small CSV test file to load (avoids ACID/INSERT VALUES issues)
+  # Create the CSV as the hadoop user (owner) so LOAD DATA LOCAL can always
+  # read it, even across user namespaces (rootless Docker, etc.).
+  su - "${HADOOP_USER}" -c '
+    rm -f /tmp/hive_test_data.csv
+    printf "1,Alice\n2,Bob\n3,Charlie\n" > /tmp/hive_test_data.csv
+    chmod 644 /tmp/hive_test_data.csv
+  ' || die "Failed to create test CSV for ${HADOOP_USER}."
   local testcsv=/tmp/hive_test_data.csv
-  printf '1,Alice\n2,Bob\n3,Charlie\n' > "${testcsv}"
-  chown "${HADOOP_USER}:${HADOOP_GROUP}" "${testcsv}"
-  chmod 644 "${testcsv}"
 
   su - "${HADOOP_USER}" -c "
     . /etc/profile.d/bigdata.sh
