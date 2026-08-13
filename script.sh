@@ -242,6 +242,8 @@ setup_ssh() {
   local key=/home/${HADOOP_USER}/.ssh/id_rsa
   local auth=/home/${HADOOP_USER}/.ssh/authorized_keys
   mkdir -p /home/${HADOOP_USER}/.ssh
+  chown "${HADOOP_USER}:${HADOOP_GROUP}" /home/${HADOOP_USER}/.ssh
+  chmod 700 /home/${HADOOP_USER}/.ssh
   if [[ ! -f "${key}" ]]; then
     su - "${HADOOP_USER}" -c "ssh-keygen -t rsa -P '' -f ${key}"
   fi
