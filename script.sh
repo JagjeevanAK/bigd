@@ -282,7 +282,8 @@ setup_ssh() {
   chown "${HADOOP_USER}:${HADOOP_GROUP}" /home/${HADOOP_USER}/.ssh
   chmod 700 /home/${HADOOP_USER}/.ssh
   if [[ ! -f "${key}" ]]; then
-    su - "${HADOOP_USER}" -c "ssh-keygen -t rsa -P '' -f ${key}"
+    su - "${HADOOP_USER}" -c "ssh-keygen -q -t rsa -N '' -f ${key}" \
+      >/dev/null 2>&1 || die "Failed to generate SSH key for ${HADOOP_USER}."
   fi
 
   # Append public key only if not already present (idempotent)
@@ -294,8 +295,12 @@ setup_ssh() {
   chmod 700 /home/${HADOOP_USER}/.ssh
   chmod 600 "${auth}"
 
-  su - "${HADOOP_USER}" -c "ssh-keyscan -H localhost >> /home/${HADOOP_USER}/.ssh/known_hosts 2>/dev/null || true"
-  su - "${HADOOP_USER}" -c "ssh-keyscan -H 0.0.0.0 >> /home/${HADOOP_USER}/.ssh/known_hosts 2>/dev/null || true"
+  local known=/home/${HADOOP_USER}/.ssh/known_hosts
+  su - "${HADOOP_USER}" -c "
+    ssh-keyscan -H localhost 2>/dev/null | sort -u >> ${known}
+    ssh-keyscan -H 0.0.0.0 2>/dev/null | sort -u >> ${known}
+    sort -u -o ${known} ${known}
+  "
 
   # Verify passwordless ssh works
   su - "${HADOOP_USER}" -c "ssh -o StrictHostKeyChecking=no -o BatchMode=yes localhost 'echo ssh-ok'" \
@@ -368,6 +373,8 @@ test_hdfs() {
     echo "hostname: $(hostname)"
     seq 1 100
   } > "${sample}"
+  chown "${HADOOP_USER}:${HADOOP_GROUP}" "${sample}"
+  chmod 644 "${sample}"
 
   su - "${HADOOP_USER}" -c "
     . /etc/profile.d/bigdata.sh
@@ -390,6 +397,7 @@ test_hive() {
   local testcsv=/tmp/hive_test_data.csv
   printf '1,Alice\n2,Bob\n3,Charlie\n' > "${testcsv}"
   chown "${HADOOP_USER}:${HADOOP_GROUP}" "${testcsv}"
+  chmod 644 "${testcsv}"
 
   su - "${HADOOP_USER}" -c "
     . /etc/profile.d/bigdata.sh
@@ -456,6 +464,14 @@ print_summary() {
 main() {
   need_root
   check_os
+
+  # Single-instance lock: prevents concurrent runs from racing on the same
+  # files (SSH keys, extraction dirs, test data, ...).
+  exec 9> /tmp/bigd-hadoop-install.lock
+  if ! flock -n 9; then
+    die "Another instance of this script is already running (lock: /tmp/bigd-hadoop-install.lock)."
+  fi
+
   install_packages
   install_java8
   setup_hadoop_user
